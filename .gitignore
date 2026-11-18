@@ -26,3 +26,7 @@
 .idea/
 *.swp
 
+# Python tooling cache
+__pycache__/
+*.py[cod]
+
