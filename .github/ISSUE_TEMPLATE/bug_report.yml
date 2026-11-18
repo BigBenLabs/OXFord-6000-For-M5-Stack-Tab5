@@ -1,0 +1,29 @@
+name: Bug report
+description: Report a Tab5 FSRS issue
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the issue and the expected behavior.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: ESP32-P4 revision
+      placeholder: "v1.3"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Boot / serial logs
+      description: Paste relevant logs from `idf.py monitor`.
+      render: shell
+  - type: textarea
+    id: data
+    attributes:
+      label: Data and audio setup
+      description: Confirm where `/database/oxford.db` and the audio folders are placed.
+

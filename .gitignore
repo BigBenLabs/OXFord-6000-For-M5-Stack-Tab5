@@ -1,0 +1,28 @@
+.DS_Store
+
+# Private/derived word data and audio
+/audio/
+/audio_副本/
+/database/*.db
+!/database/sample.db
+/database_副本/
+/data_processing/
+/screenshots/
+
+# ESP-IDF generated output
+/firmware/build/
+/firmware/managed_components/
+/firmware/sdkconfig
+/firmware/.idf_build_apps.toml
+
+# Release binaries are distributed through GitHub Releases
+/dist/
+
+# Raw screenshots are converted to PNG before committing
+/docs/images/raw/
+*.bmp
+
+.vscode/
+.idea/
+*.swp
+
