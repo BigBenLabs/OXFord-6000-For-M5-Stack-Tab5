@@ -23,7 +23,7 @@ jobs:
           cd firmware
           idf.py set-target esp32p4
           idf.py build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: tab5-fsrs-firmware
           path: |
