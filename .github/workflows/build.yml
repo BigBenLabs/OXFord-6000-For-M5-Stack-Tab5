@@ -9,8 +9,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container: espressif/idf:v5.5.4
+    env:
+      # ESP-WiFi-Remote 0.8.5 selects its Kconfig files by IDF major/minor.
+      ESP_IDF_VERSION: "5.5"
+      # Use the locked dependencies without querying incompatible old metadata.
+      IDF_COMPONENT_CHECK_NEW_VERSION: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build Tab5 firmware
         shell: bash
         run: |
