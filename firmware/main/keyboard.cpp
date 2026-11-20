@@ -250,6 +250,8 @@ bool KeyboardService::read_and_parse_events()
                 // consumes ordinary printable characters.
                 if ((modifier & 0x05) == 0) {
                     copy_text(event, text, text_length);
+                } else {
+                    event.type = KeyEvent::Type::Other;
                 }
             }
         }

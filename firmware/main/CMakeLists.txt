@@ -6,6 +6,8 @@ idf_component_register(
         "clock_service.cpp"
         "audio_service.cpp"
         "keyboard.cpp"
+        "power_service.cpp"
+        "wifi_service.cpp"
         "ui.cpp"
         "fonts/font_zh_28.c"
     INCLUDE_DIRS "."
@@ -19,6 +21,9 @@ idf_component_register(
         chmorgan__esp-audio-player
         esp_sqlite3
         nvs_flash
+        esp_event
+        esp_netif
+        esp_wifi
 )
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE LV_LVGL_H_INCLUDE_SIMPLE)

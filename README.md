@@ -52,6 +52,10 @@ capture workflow and licensing guidance.
   default.
 - UK/US MP3 pronunciation buttons next to every displayed word.
 - Tab5 Keyboard character mode over I2C, including Ctrl+S screenshot capture.
+- IP2326 charging enable plus live INA226 battery percentage/voltage in the top bar.
+- Five-minute backlight sleep; touch or any keyboard key wakes the display.
+- First-run WiFi scanning and password entry, with credentials persisted in NVS
+  and an airplane-mode switch in Settings.
 - 1280×720 dark green UI with a Noto Sans CJK + IPA font subset.
 - ESP32-P4 v1.x compatibility; ST7121/ST7123/ILI9881C display auto-detection.
 - FAT long-filename support for DB and MP3 filenames.
@@ -91,6 +95,9 @@ ESP-IDF 5.5.4 is recommended.
 source ~/.espressif/tools/activate_idf_v5.5.4.sh
 cd firmware
 idf.py set-target esp32p4
+export ESP_IDF_VERSION=5.5
+export IDF_COMPONENT_STORAGE_URL=https://components-file.espressif.com.cn/
+export IDF_COMPONENT_CHECK_NEW_VERSION=0
 idf.py build
 ```
 

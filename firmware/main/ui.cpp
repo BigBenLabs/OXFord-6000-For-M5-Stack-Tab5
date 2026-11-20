@@ -1,9 +1,13 @@
 #include "ui.h"
 
+#include "bsp/esp-bsp.h"
 #include "clock_service.h"
 #include "fsrs.h"
 
 #include "esp_log.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include <algorithm>
 #include <cctype>
@@ -50,6 +54,17 @@ bool is_blank_text(const KeyEvent &event)
            event.text[1] == '\0';
 }
 
+const char *signal_name(int rssi)
+{
+    if (rssi >= -55) {
+        return "强";
+    }
+    if (rssi >= -70) {
+        return "中";
+    }
+    return "弱";
+}
+
 void put_le16(uint8_t *out, uint16_t value)
 {
     out[0] = static_cast<uint8_t>(value & 0xFF);
@@ -75,6 +90,8 @@ const char *screen_name(AppUi::Screen screen)
         return "summary";
     case AppUi::Screen::Settings:
         return "settings";
+    case AppUi::Screen::Wifi:
+        return "wifi";
     case AppUi::Screen::Error:
         return "error";
     }
@@ -83,8 +100,9 @@ const char *screen_name(AppUi::Screen screen)
 
 } // namespace
 
-AppUi::AppUi(Database &database, AudioService &audio, KeyboardService &keyboard)
-    : db_(database), audio_(audio), keyboard_(keyboard)
+AppUi::AppUi(Database &database, AudioService &audio, KeyboardService &keyboard,
+             PowerService &power, WifiService &wifi)
+    : db_(database), audio_(audio), keyboard_(keyboard), power_(power), wifi_(wifi)
 {
 }
 
@@ -98,6 +116,13 @@ void AppUi::init(lv_display_t *display)
     lv_obj_set_style_pad_all(screen_, 0, 0);
     lv_obj_set_scrollbar_mode(screen_, LV_SCROLLBAR_MODE_OFF);
     lv_screen_load(screen_);
+    power_status_ = power_.status();
+    last_usb_present_ = power_status_.usb_present;
+    last_power_update_ms_ =
+        static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
+    last_wifi_update_ms_ = last_power_update_ms_;
+    last_wifi_revision_ = wifi_.network_revision();
+    last_wifi_state_ = wifi_.state();
     timer_ = lv_timer_create(timer_event, 40, this);
 }
 
@@ -109,6 +134,11 @@ void AppUi::clear_screen()
     }
     toast_obj_ = nullptr;
     keyboard_status_label_ = nullptr;
+    battery_label_ = nullptr;
+    battery_bar_ = nullptr;
+    battery_terminal_ = nullptr;
+    wifi_status_label_ = nullptr;
+    sleep_overlay_ = nullptr;
     if (screen_ != nullptr) {
         lv_obj_clean(screen_);
     }
@@ -186,11 +216,53 @@ lv_obj_t *AppUi::make_top_bar(const char *left, const char *center, bool home_bu
         lv_obj_t *center_label = make_label(bar, center, &font_zh_28, COLOR_MUTED);
         lv_obj_align(center_label, LV_ALIGN_CENTER, 0, 0);
     }
+    make_battery_indicator(bar, home_button ? -166 : -28);
     if (home_button) {
         lv_obj_t *home = make_button(bar, "主页", COLOR_GREEN_DARK, ACTION_HOME, 108, 44);
         lv_obj_align(home, LV_ALIGN_RIGHT_MID, -24, 0);
     }
     return bar;
+}
+
+lv_obj_t *AppUi::make_battery_indicator(lv_obj_t *parent, lv_coord_t right_offset)
+{
+    lv_obj_t *indicator = lv_obj_create(parent);
+    lv_obj_set_size(indicator, 150, 38);
+    lv_obj_set_style_bg_opa(indicator, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(indicator, 0, 0);
+    lv_obj_set_style_pad_all(indicator, 0, 0);
+    lv_obj_set_scrollbar_mode(indicator, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align(indicator, LV_ALIGN_RIGHT_MID, right_offset, 0);
+
+    battery_bar_ = lv_bar_create(indicator);
+    lv_obj_set_pos(battery_bar_, 0, 7);
+    lv_obj_set_size(battery_bar_, 50, 24);
+    lv_obj_set_style_bg_color(battery_bar_, lv_color_hex(0x101D16), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(battery_bar_, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(battery_bar_, lv_color_hex(COLOR_MUTED), LV_PART_MAIN);
+    lv_obj_set_style_border_width(battery_bar_, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(battery_bar_, 5, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(battery_bar_, 3, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(battery_bar_, lv_color_hex(COLOR_GREEN), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(battery_bar_, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(battery_bar_, 2, LV_PART_INDICATOR);
+    lv_bar_set_range(battery_bar_, 0, 100);
+    lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
+
+    battery_terminal_ = lv_obj_create(indicator);
+    lv_obj_set_pos(battery_terminal_, 50, 14);
+    lv_obj_set_size(battery_terminal_, 5, 10);
+    lv_obj_set_style_bg_color(battery_terminal_, lv_color_hex(COLOR_MUTED), 0);
+    lv_obj_set_style_bg_opa(battery_terminal_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(battery_terminal_, 0, 0);
+    lv_obj_set_style_radius(battery_terminal_, 1, 0);
+
+    battery_label_ = make_label(indicator, "--%", &font_zh_28, COLOR_TEXT);
+    lv_obj_set_pos(battery_label_, 62, 1);
+    lv_obj_set_width(battery_label_, 86);
+    lv_obj_set_style_text_align(battery_label_, LV_TEXT_ALIGN_RIGHT, 0);
+    update_power_widget();
+    return indicator;
 }
 
 void AppUi::show_fatal_error(const std::string &message)
@@ -437,6 +509,13 @@ void AppUi::render_study()
     lv_obj_t *tag_label = make_label(tag, card_mode_name(current_.mode), &font_zh_28,
                                      COLOR_GREEN);
     lv_obj_center(tag_label);
+    if (!current_word_.type.empty()) {
+        const std::string type_text = "词性 " + current_word_.type;
+        lv_obj_t *type_tag = make_panel(card, 176, 20, 280, 38, COLOR_PANEL_2, 19);
+        lv_obj_t *type_label =
+            make_label(type_tag, type_text.c_str(), &font_zh_28, COLOR_MUTED);
+        lv_obj_center(type_label);
+    }
 
     if (current_.mode == CardMode::Recognition) {
         if (!reveal_) {
@@ -473,10 +552,12 @@ void AppUi::render_study()
                 make_label(card, current_word_.definition.c_str(), &font_zh_28,
                            COLOR_MUTED, 1040);
             lv_obj_align(definition, LV_ALIGN_TOP_LEFT, 70, 278);
+            lv_obj_update_layout(card);
+            const lv_coord_t example_y = 278 + lv_obj_get_height(definition) + 10;
             lv_obj_t *example =
                 make_label(card, current_word_.example.c_str(), &font_zh_28,
                            0x6F897C, 1040);
-            lv_obj_align(example, LV_ALIGN_TOP_LEFT, 70, 372);
+            lv_obj_align(example, LV_ALIGN_TOP_LEFT, 70, example_y);
             make_rating_row(screen_, false);
         }
     } else if (current_.mode == CardMode::Recall) {
@@ -509,10 +590,12 @@ void AppUi::render_study()
                 make_label(card, current_word_.definition.c_str(), &font_zh_28,
                            COLOR_MUTED, 1040);
             lv_obj_align(definition, LV_ALIGN_TOP_LEFT, 70, 278);
+            lv_obj_update_layout(card);
+            const lv_coord_t example_y = 278 + lv_obj_get_height(definition) + 10;
             lv_obj_t *example =
                 make_label(card, current_word_.example.c_str(), &font_zh_28,
                            0x6F897C, 1040);
-            lv_obj_align(example, LV_ALIGN_TOP_LEFT, 70, 372);
+            lv_obj_align(example, LV_ALIGN_TOP_LEFT, 70, example_y);
             make_rating_row(screen_, false);
         }
     } else {
@@ -650,7 +733,7 @@ void AppUi::render_settings()
 {
     screen_type_ = Screen::Settings;
     clear_screen();
-    make_top_bar("设置", "默认 FSRS 参数", true);
+    make_top_bar("设置", "设备与 FSRS 参数", true);
 
     make_stepper(screen_, 90, "每天最多学习的新单词", edit_settings_.new_words_per_day,
                  ACTION_NEW_MINUS, ACTION_NEW_PLUS);
@@ -659,28 +742,79 @@ void AppUi::render_settings()
     make_stepper(screen_, 260, "发音音量", edit_settings_.audio_volume,
                  ACTION_VOLUME_MINUS, ACTION_VOLUME_PLUS);
 
-    lv_obj_t *log_panel = make_panel(screen_, 140, 345, 1000, 76, COLOR_PANEL, 16);
-    lv_obj_t *log_label = make_label(log_panel, "审查日志写入（表已创建）", &font_zh_28,
-                                     COLOR_TEXT);
-    lv_obj_align(log_label, LV_ALIGN_LEFT_MID, 28, 0);
+    lv_obj_t *log_panel = make_panel(screen_, 140, 345, 490, 76, COLOR_PANEL, 16);
+    lv_obj_t *log_label = make_label(log_panel, "审查日志", &font_zh_28, COLOR_TEXT);
+    lv_obj_align(log_label, LV_ALIGN_LEFT_MID, 24, 0);
     make_button(log_panel, edit_settings_.write_review_log ? "开启" : "关闭",
                 edit_settings_.write_review_log ? COLOR_GREEN : COLOR_GREEN_DARK,
-                ACTION_LOG_TOGGLE, 130, 50);
+                ACTION_LOG_TOGGLE, 120, 50);
     lv_obj_t *log_button = lv_obj_get_child(log_panel, lv_obj_get_child_count(log_panel) - 1);
-    lv_obj_align(log_button, LV_ALIGN_RIGHT_MID, -28, 0);
+    lv_obj_align(log_button, LV_ALIGN_RIGHT_MID, -20, 0);
 
-    char detail[512];
+    lv_obj_t *wifi_panel = make_panel(screen_, 650, 345, 490, 76, COLOR_PANEL, 16);
+    lv_obj_t *wifi_label = make_label(wifi_panel, "WiFi", &font_zh_28, COLOR_TEXT);
+    lv_obj_align(wifi_label, LV_ALIGN_LEFT_MID, 22, 0);
+    wifi_status_label_ = make_label(wifi_panel, "…", &font_zh_28, COLOR_MUTED);
+    lv_obj_set_width(wifi_status_label_, 150);
+    lv_obj_align(wifi_status_label_, LV_ALIGN_LEFT_MID, 94, 0);
+    make_button(wifi_panel, "配置", COLOR_GREEN_DARK, ACTION_WIFI_CONFIG, 88, 50);
+    lv_obj_t *wifi_config =
+        lv_obj_get_child(wifi_panel, lv_obj_get_child_count(wifi_panel) - 1);
+    lv_obj_align(wifi_config, LV_ALIGN_RIGHT_MID, -120, 0);
+    make_button(wifi_panel, wifi_.enabled() ? "关闭" : "开启",
+                wifi_.enabled() ? COLOR_GREEN_DARK : COLOR_AMBER,
+                ACTION_WIFI_TOGGLE, 88, 50);
+    lv_obj_t *wifi_toggle =
+        lv_obj_get_child(wifi_panel, lv_obj_get_child_count(wifi_panel) - 1);
+    lv_obj_align(wifi_toggle, LV_ALIGN_RIGHT_MID, -20, 0);
+    update_wifi_status();
+
+    const PowerStatus power = power_.status();
+    char battery[96];
+    if (power.available && power.percent >= 0) {
+        std::snprintf(battery, sizeof(battery), "%d%% · %.2fV%s",
+                      power.percent, power.voltage,
+                      power.usb_present ? " · USB" : "");
+    } else if (power.usb_present) {
+        std::snprintf(battery, sizeof(battery), "检测不可用 · USB 已接入");
+    } else {
+        std::snprintf(battery, sizeof(battery), "检测不可用");
+    }
+
+    std::string wifi_short;
+    switch (wifi_.state()) {
+    case WifiService::State::Connected:
+        wifi_short = "已连接";
+        break;
+    case WifiService::State::Scanning:
+        wifi_short = "扫描中";
+        break;
+    case WifiService::State::Connecting:
+        wifi_short = "连接中";
+        break;
+    case WifiService::State::Error:
+        wifi_short = "异常";
+        break;
+    case WifiService::State::Disabled:
+        wifi_short = "关闭";
+        break;
+    default:
+        wifi_short = wifi_.enabled() ? "已开启" : "关闭";
+        break;
+    }
+
+    char detail[640];
     std::snprintf(detail, sizeof(detail),
                   "FSRS-6 默认权重 · 目标保持率 90%%\n"
-                  "认读 stability ≥ %.0f 天解锁默写\n"
-                  "默写 stability ≥ %.0f 天计为熟练\n"
+                  "认读 stability≥%.0f天解锁默写，默写 stability≥%.0f天记为熟练\n"
                   "本级熟练占比 %.0f%% 解锁下一等级\n"
-                  "RTC %s · 日志%s",
+                  "RTC %s · WiFi %s · 电池 %s",
                   edit_settings_.recognition_gate_days,
                   edit_settings_.dictation_gate_days,
                   edit_settings_.level_unlock_ratio * 100.0f,
                   clock_service::format_time(clock_service::now(), "%Y-%m-%d %H:%M").c_str(),
-                  edit_settings_.write_review_log ? "开启" : "关闭");
+                  wifi_short.c_str(),
+                  battery);
     lv_obj_t *detail_label = make_label(screen_, detail, &font_zh_28, COLOR_MUTED, 1000);
     lv_obj_set_pos(detail_label, 140, 438);
 
@@ -688,6 +822,184 @@ void AppUi::render_settings()
     lv_obj_set_pos(save, 340, 650);
     lv_obj_t *back = make_button(screen_, "取消", COLOR_GREEN_DARK, ACTION_HOME, 220, 56);
     lv_obj_set_pos(back, 700, 650);
+}
+
+void AppUi::show_wifi_setup()
+{
+    wifi_return_to_settings_ = screen_type_ == Screen::Settings;
+    wifi_page_ = WifiPage::List;
+    selected_wifi_index_ = -1;
+    selected_wifi_valid_ = false;
+    wifi_password_.clear();
+    wifi_connected_notified_ = false;
+    if (!wifi_.enabled()) {
+        wifi_.set_enabled(true);
+    }
+    render_wifi();
+    wifi_.start_scan();
+}
+
+void AppUi::render_wifi()
+{
+    screen_type_ = Screen::Wifi;
+    clear_screen();
+    make_top_bar("WiFi 设置", "网络配置", false);
+
+    wifi_status_label_ =
+        make_label(screen_, wifi_.status_text().c_str(), &font_zh_28,
+                   wifi_.state() == WifiService::State::Error ? COLOR_RED : COLOR_MUTED,
+                   1120);
+    lv_obj_set_pos(wifi_status_label_, 70, 86);
+
+    if (wifi_page_ == WifiPage::List) {
+        const std::vector<WifiService::Network> networks = wifi_.networks();
+        if (networks.empty()) {
+            lv_obj_t *empty = make_panel(screen_, 170, 180, 940, 300, COLOR_PANEL, 22);
+            lv_obj_t *text = make_label(
+                empty,
+                wifi_.state() == WifiService::State::Scanning
+                    ? "正在搜索附近的 WiFi 网络...\n请稍候"
+                    : "没有发现可用网络。\n请确认 WiFi 已开启，然后点击“重新扫描”。",
+                &font_zh_28, COLOR_TEXT, 860);
+            lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_center(text);
+        } else {
+            lv_obj_t *list = lv_obj_create(screen_);
+            lv_obj_set_pos(list, 70, 142);
+            lv_obj_set_size(list, 1140, 452);
+            lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(list, 0, 0);
+            lv_obj_set_style_pad_all(list, 0, 0);
+            lv_obj_set_scroll_dir(list, LV_DIR_VER);
+            lv_obj_set_scrollbar_mode(list, LV_SCROLLBAR_MODE_ACTIVE);
+            for (size_t i = 0; i < networks.size(); ++i) {
+                const WifiService::Network &network = networks[i];
+                char label[128];
+                std::snprintf(label, sizeof(label), "%s    %s · 信号%s",
+                              network.ssid.c_str(),
+                              WifiService::security_name(network.auth).c_str(),
+                              signal_name(network.rssi));
+                lv_obj_t *button =
+                    make_button(list, label, COLOR_PANEL_2,
+                                ACTION_WIFI_SELECT_BASE + i, 1112, 76);
+                lv_obj_set_pos(button, 0, static_cast<lv_coord_t>(i * 88));
+                lv_obj_t *button_label = lv_obj_get_child(button, 0);
+                lv_obj_set_width(button_label, 1070);
+                lv_label_set_long_mode(button_label, LV_LABEL_LONG_DOT);
+                lv_obj_set_style_text_align(button_label,
+                                            LV_TEXT_ALIGN_CENTER, 0);
+            }
+        }
+
+        lv_obj_t *refresh =
+            make_button(screen_, "重新扫描", COLOR_GREEN_DARK, ACTION_WIFI_REFRESH,
+                        210, 58);
+        lv_obj_set_pos(refresh, 70, 620);
+        lv_obj_t *skip =
+            make_button(screen_, "跳过并关闭 WiFi", COLOR_AMBER, ACTION_WIFI_SKIP,
+                        360, 58);
+        lv_obj_set_pos(skip, 300, 620);
+        lv_obj_t *back =
+            make_button(screen_, "返回", COLOR_GREEN_DARK, ACTION_HOME, 220, 58);
+        lv_obj_set_pos(back, 990, 620);
+    } else {
+        if (!selected_wifi_valid_) {
+            wifi_page_ = WifiPage::List;
+            render_wifi();
+            return;
+        }
+        const WifiService::Network &network = selected_wifi_network_;
+
+        lv_obj_t *panel = make_panel(screen_, 70, 145, 1140, 410, COLOR_PANEL, 22);
+        char title[128];
+        std::snprintf(title, sizeof(title), "%s  ·  %s",
+                      network.ssid.c_str(),
+                      WifiService::security_name(network.auth).c_str());
+        lv_obj_t *ssid_label =
+            make_label(panel, title, &font_zh_28, COLOR_TEXT, 1060);
+        lv_obj_set_pos(ssid_label, 40, 28);
+
+        lv_obj_t *password_box =
+            make_panel(panel, 40, 105, 1060, 82, COLOR_PANEL_2, 14);
+        std::string masked = wifi_password_;
+        std::fill(masked.begin(), masked.end(), '*');
+        char password_text[160];
+        std::snprintf(password_text, sizeof(password_text), "%s%s",
+                      wifi_password_.empty() ? "" : "密码  ",
+                      masked.c_str());
+        lv_obj_t *input = make_label(
+            password_box,
+            wifi_password_.empty() ? "请输入 WPA 密码" : password_text,
+            &font_zh_28, wifi_password_.empty() ? COLOR_MUTED : COLOR_GREEN, 1010);
+        lv_obj_align(input, LV_ALIGN_LEFT_MID, 24, 0);
+
+        char hint[320];
+        std::snprintf(hint, sizeof(hint),
+                      "使用 Tab5 键盘输入密码，Enter 连接，Esc 返回网络列表。\n"
+                      "已输入 %zu / 63 位；保存后会记住此网络，下次开机自动连接。",
+                      wifi_password_.size());
+        lv_obj_t *hint_label =
+            make_label(panel, hint, &font_zh_28, COLOR_MUTED, 1060);
+        lv_obj_set_pos(hint_label, 40, 225);
+
+        lv_obj_t *back =
+            make_button(screen_, "返回网络列表", COLOR_GREEN_DARK,
+                        ACTION_WIFI_BACK_LIST, 270, 58);
+        lv_obj_set_pos(back, 70, 620);
+        lv_obj_t *erase =
+            make_button(screen_, "删除一位", COLOR_AMBER,
+                        ACTION_WIFI_BACKSPACE, 180, 58);
+        lv_obj_set_pos(erase, 830, 620);
+        lv_obj_t *connect =
+            make_button(screen_, "连接", COLOR_GREEN, ACTION_WIFI_CONNECT,
+                        200, 58);
+        lv_obj_set_pos(connect, 1030, 620);
+    }
+
+    last_wifi_revision_ = wifi_.network_revision();
+    last_wifi_state_ = wifi_.state();
+    update_wifi_status();
+    update_power_widget();
+}
+
+void AppUi::select_wifi_network(int index)
+{
+    const std::vector<WifiService::Network> networks = wifi_.networks();
+    if (index < 0 || index >= static_cast<int>(networks.size())) {
+        return;
+    }
+    selected_wifi_index_ = index;
+    selected_wifi_network_ = networks[index];
+    selected_wifi_valid_ = true;
+    wifi_password_.clear();
+    if (WifiService::is_open(selected_wifi_network_.auth)) {
+        wifi_page_ = WifiPage::Password;
+        connect_selected_wifi();
+        return;
+    }
+    wifi_page_ = WifiPage::Password;
+    render_wifi();
+}
+
+void AppUi::connect_selected_wifi()
+{
+    if (!selected_wifi_valid_) {
+        return;
+    }
+    const WifiService::Network &network = selected_wifi_network_;
+    if (!WifiService::is_open(network.auth) && wifi_password_.size() < 8) {
+        show_toast("加密 WiFi 密码至少需要 8 位");
+        return;
+    }
+    if (!wifi_.save_and_connect(network, wifi_password_)) {
+        update_wifi_status();
+        return;
+    }
+    if (wifi_status_label_ != nullptr) {
+        lv_label_set_text(wifi_status_label_, wifi_.status_text().c_str());
+        lv_obj_set_style_text_color(wifi_status_label_,
+                                    lv_color_hex(COLOR_GREEN), 0);
+    }
 }
 
 void AppUi::toggle_reveal()
@@ -778,11 +1090,51 @@ int AppUi::dictation_letter_count() const
 void AppUi::handle_key(const KeyEvent &event)
 {
     ESP_LOGD(TAG, "key event type=%d text='%s'", static_cast<int>(event.type), event.text);
+    if (display_sleeping_) {
+        wake_display();
+        return;
+    }
+    lv_display_trigger_activity(display_);
     if (event.type == KeyEvent::Type::Screenshot) {
         capture_screenshot();
         return;
     }
+    if (screen_type_ == Screen::Wifi) {
+        if (wifi_page_ == WifiPage::Password) {
+            if (event.type == KeyEvent::Type::Escape) {
+                wifi_page_ = WifiPage::List;
+                wifi_password_.clear();
+                render_wifi();
+            } else if (event.type == KeyEvent::Type::Backspace) {
+                if (!wifi_password_.empty()) {
+                    wifi_password_.pop_back();
+                    render_wifi();
+                }
+            } else if (event.type == KeyEvent::Type::Enter) {
+                connect_selected_wifi();
+            } else if (event.type == KeyEvent::Type::Text) {
+                const std::string text(event.text);
+                for (unsigned char ch : text) {
+                    if (ch >= 0x20 && ch <= 0x7E && wifi_password_.size() < 63) {
+                        wifi_password_.push_back(static_cast<char>(ch));
+                    }
+                }
+                render_wifi();
+            }
+        } else if (event.type == KeyEvent::Type::Escape) {
+            if (wifi_return_to_settings_) {
+                render_settings();
+            } else {
+                show_home();
+            }
+        }
+        return;
+    }
     if (screen_type_ != Screen::Study) {
+        if (screen_type_ == Screen::Settings &&
+            event.type == KeyEvent::Type::Escape) {
+            show_home();
+        }
         return;
     }
     if (event.type == KeyEvent::Type::Escape) {
@@ -905,7 +1257,14 @@ void AppUi::poll_keyboard()
 
 void AppUi::handle_action(int action)
 {
+    if (action >= ACTION_WIFI_SELECT_BASE) {
+        select_wifi_network(action - ACTION_WIFI_SELECT_BASE);
+        return;
+    }
     switch (action) {
+    case ACTION_WAKE:
+        wake_display();
+        break;
     case ACTION_START:
         start_session();
         break;
@@ -914,7 +1273,11 @@ void AppUi::handle_action(int action)
         render_settings();
         break;
     case ACTION_HOME:
-        show_home();
+        if (screen_type_ == Screen::Wifi && wifi_return_to_settings_) {
+            render_settings();
+        } else {
+            show_home();
+        }
         break;
     case ACTION_REVEAL:
         toggle_reveal();
@@ -979,6 +1342,50 @@ void AppUi::handle_action(int action)
             show_toast("设置保存失败");
         }
         break;
+    case ACTION_WIFI_TOGGLE: {
+        const bool enable = !wifi_.enabled();
+        wifi_.set_enabled(enable);
+        if (enable && !wifi_.configured()) {
+            show_wifi_setup();
+        } else {
+            render_settings();
+            show_toast(enable ? "WiFi 已开启" : "WiFi 已关闭，进入飞机模式");
+        }
+        break;
+    }
+    case ACTION_WIFI_CONFIG:
+        show_wifi_setup();
+        break;
+    case ACTION_WIFI_REFRESH:
+        wifi_page_ = WifiPage::List;
+        selected_wifi_index_ = -1;
+        selected_wifi_valid_ = false;
+        wifi_password_.clear();
+        wifi_.start_scan();
+        render_wifi();
+        break;
+    case ACTION_WIFI_SKIP:
+        wifi_.set_enabled(false);
+        wifi_.mark_setup_dismissed();
+        show_home();
+        show_toast("已跳过 WiFi 配置，设备保持离线");
+        break;
+    case ACTION_WIFI_BACK_LIST:
+        wifi_page_ = WifiPage::List;
+        selected_wifi_index_ = -1;
+        selected_wifi_valid_ = false;
+        wifi_password_.clear();
+        render_wifi();
+        break;
+    case ACTION_WIFI_CONNECT:
+        connect_selected_wifi();
+        break;
+    case ACTION_WIFI_BACKSPACE:
+        if (!wifi_password_.empty()) {
+            wifi_password_.pop_back();
+            render_wifi();
+        }
+        break;
     default:
         break;
     }
@@ -995,11 +1402,195 @@ void AppUi::action_event(lv_event_t *event)
     self->handle_action(action);
 }
 
+void AppUi::update_power_widget()
+{
+    if (battery_bar_ == nullptr || battery_label_ == nullptr) {
+        return;
+    }
+
+    char text[24];
+    if (!power_status_.available || power_status_.percent < 0) {
+        std::snprintf(text, sizeof(text), "%s",
+                      power_status_.usb_present ? "USB" : "--%");
+        lv_bar_set_value(battery_bar_, 0, LV_ANIM_OFF);
+    } else {
+        std::snprintf(text, sizeof(text), "%d%%%s", power_status_.percent,
+                      power_status_.usb_present ? "+" : "");
+        lv_bar_set_value(battery_bar_,
+                         std::clamp(power_status_.percent, 0, 100), LV_ANIM_OFF);
+    }
+    lv_label_set_text(battery_label_, text);
+
+    uint32_t color = COLOR_GREEN;
+    if (power_status_.available && power_status_.percent <= 15) {
+        color = COLOR_RED;
+    } else if (power_status_.usb_present) {
+        color = COLOR_TEAL;
+    }
+    lv_obj_set_style_bg_color(battery_bar_, lv_color_hex(color), LV_PART_INDICATOR);
+    if (battery_terminal_ != nullptr) {
+        lv_obj_set_style_bg_color(battery_terminal_, lv_color_hex(color), 0);
+    }
+    lv_obj_set_style_text_color(
+        battery_label_,
+        lv_color_hex(power_status_.available && power_status_.percent <= 15
+                         ? COLOR_RED
+                         : COLOR_TEXT),
+        0);
+}
+
+void AppUi::update_power_status()
+{
+    const int previous_percent = power_status_.percent;
+    power_status_ = power_.update();
+
+    if (power_status_.usb_present && !last_usb_present_) {
+        show_toast("USB 已接入，正在使用外部电源");
+    }
+    last_usb_present_ = power_status_.usb_present;
+
+    if (power_status_.charging && power_status_.percent > 30) {
+        low_battery_warning_percent_ = 100;
+    }
+    if (power_status_.available && power_status_.percent >= 0) {
+        const int thresholds[] = {20, 10, 5};
+        for (int threshold : thresholds) {
+            if (previous_percent > threshold &&
+                power_status_.percent <= threshold &&
+                low_battery_warning_percent_ > threshold) {
+                char message[96];
+                std::snprintf(message, sizeof(message),
+                              "电量仅剩 %d%%，请尽快连接充电器",
+                              power_status_.percent);
+                show_toast(message);
+                low_battery_warning_percent_ = threshold;
+                break;
+            }
+        }
+    }
+    update_power_widget();
+}
+
+void AppUi::update_wifi_status()
+{
+    if (wifi_status_label_ == nullptr) {
+        return;
+    }
+
+    std::string text;
+    if (screen_type_ == Screen::Wifi) {
+        text = wifi_.status_text();
+    } else {
+        switch (wifi_.state()) {
+        case WifiService::State::Disabled:
+            text = "关闭";
+            break;
+        case WifiService::State::Connected:
+            text = "已连接";
+            break;
+        case WifiService::State::Scanning:
+            text = "扫描中";
+            break;
+        case WifiService::State::Connecting:
+            text = "连接中";
+            break;
+        case WifiService::State::Error:
+            text = "异常";
+            break;
+        default:
+            text = wifi_.enabled() ? "已开启" : "关闭";
+            break;
+        }
+    }
+    lv_label_set_text(wifi_status_label_, text.c_str());
+    lv_obj_set_style_text_color(
+        wifi_status_label_,
+        lv_color_hex(wifi_.state() == WifiService::State::Error
+                         ? COLOR_RED
+                         : wifi_.state() == WifiService::State::Connected
+                               ? COLOR_GREEN
+                               : COLOR_MUTED),
+        0);
+}
+
+void AppUi::enter_sleep()
+{
+    if (display_sleeping_ || screen_ == nullptr) {
+        return;
+    }
+    sleep_overlay_ = lv_obj_create(screen_);
+    lv_obj_set_pos(sleep_overlay_, 0, 0);
+    lv_obj_set_size(sleep_overlay_, 1280, 720);
+    lv_obj_set_style_bg_color(sleep_overlay_, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(sleep_overlay_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(sleep_overlay_, 0, 0);
+    lv_obj_set_style_radius(sleep_overlay_, 0, 0);
+    lv_obj_set_style_pad_all(sleep_overlay_, 0, 0);
+    lv_obj_add_flag(sleep_overlay_, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_user_data(
+        sleep_overlay_,
+        reinterpret_cast<void *>(static_cast<intptr_t>(ACTION_WAKE)));
+    lv_obj_add_event_cb(sleep_overlay_, action_event, LV_EVENT_CLICKED, this);
+    lv_obj_move_foreground(sleep_overlay_);
+    display_sleeping_ = true;
+    bsp_display_backlight_off();
+    ESP_LOGI(TAG, "display sleep after 5 minutes of inactivity");
+}
+
+void AppUi::wake_display()
+{
+    if (!display_sleeping_) {
+        return;
+    }
+    if (sleep_overlay_ != nullptr) {
+        lv_obj_delete(sleep_overlay_);
+        sleep_overlay_ = nullptr;
+    }
+    bsp_display_backlight_on();
+    display_sleeping_ = false;
+    lv_display_trigger_activity(display_);
+    ESP_LOGI(TAG, "display awake");
+}
+
 void AppUi::timer_event(lv_timer_t *timer)
 {
     auto self = static_cast<AppUi *>(lv_timer_get_user_data(timer));
     if (self != nullptr) {
         self->poll_keyboard();
+        const uint32_t now_ms =
+            static_cast<uint32_t>(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        if (now_ms - self->last_power_update_ms_ >= 1000) {
+            self->last_power_update_ms_ = now_ms;
+            self->update_power_status();
+        }
+        if (now_ms - self->last_wifi_update_ms_ >= 500) {
+            self->last_wifi_update_ms_ = now_ms;
+            self->update_wifi_status();
+            if (self->screen_type_ == Screen::Wifi) {
+                const WifiService::State wifi_state = self->wifi_.state();
+                const uint32_t revision = self->wifi_.network_revision();
+                if (self->wifi_page_ == WifiPage::List &&
+                    revision != self->last_wifi_revision_) {
+                    self->render_wifi();
+                } else if (self->wifi_page_ == WifiPage::Password &&
+                           wifi_state == WifiService::State::Connected &&
+                           !self->wifi_connected_notified_) {
+                    self->wifi_connected_notified_ = true;
+                    const std::string ssid = self->wifi_.connected_ssid();
+                    self->show_home();
+                    self->show_toast("WiFi 已连接：" + ssid);
+                } else {
+                    self->update_wifi_status();
+                }
+                self->last_wifi_state_ = wifi_state;
+            } else if (self->screen_type_ == Screen::Settings) {
+                self->update_wifi_status();
+            }
+        }
+        if (!self->display_sleeping_ &&
+            lv_display_get_inactive_time(self->display_) >= 300000) {
+            self->enter_sleep();
+        }
     }
 }
 

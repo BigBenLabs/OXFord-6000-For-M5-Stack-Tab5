@@ -8,7 +8,8 @@ currently reports revision v1.3.
 
 It also enables FAT long filenames and UTF-8 API paths
 (`CONFIG_FATFS_LFN_HEAP=y`), uses one DPI frame buffer on ST7121 (the official
-Tab5 configuration), and gives the main task a 32 KB stack for SQLite.
+Tab5 configuration), and gives the main task a 24 KB stack for SQLite plus
+board services.
 
 ## Build
 
@@ -16,10 +17,18 @@ Tab5 configuration), and gives the main task a 32 KB stack for SQLite.
 source ~/.espressif/tools/activate_idf_v5.5.4.sh
 cd firmware
 idf.py set-target esp32p4   # only needed after deleting sdkconfig/build
+export ESP_IDF_VERSION=5.5
+export IDF_COMPONENT_STORAGE_URL=https://components-file.espressif.com.cn/
+export IDF_COMPONENT_CHECK_NEW_VERSION=0
 idf.py build
 ```
 
-The first build downloads managed components. The SQLite component is vendored under `components/esp_sqlite3` because ESP-IDF 5.5.4 with GCC 14 requires a release-mode assert fix for the SQLite amalgamation.
+The explicit `ESP_IDF_VERSION` selects ESP-WiFi-Remote's 5.5 Kconfig set.
+`IDF_COMPONENT_STORAGE_URL` selects the China component CDN, and disabling
+the version check avoids an upstream registry metadata incompatibility in
+ESP-Hosted 1.4.0. The first build downloads managed components. The SQLite
+component is vendored under `components/esp_sqlite3` because ESP-IDF 5.5.4
+with GCC 14 requires a release-mode assert fix for the SQLite amalgamation.
 
 ## Main components
 
@@ -30,6 +39,8 @@ The first build downloads managed components. The SQLite component is vendored u
 - `main/database.cpp`: words/progress DB, card dispatch, proficiency gates.
 - `main/keyboard.cpp`: Tab5 Keyboard character mode over I2C1.
 - `main/audio_service.cpp`: ES8388 playback of UK/US MP3 files from SD.
+- `main/power_service.cpp`: IP2326 charge enable and INA226 battery monitor.
+- `main/wifi_service.cpp`: first-run WiFi scan, NVS credentials, and airplane mode.
 - `main/ui.cpp`: 1280x720 dark green LVGL interface.
 - `main/fonts/font_zh_28.c`: generated Noto Sans CJK SC + Noto Sans Latin/IPA subset covering the word DB, phonetics, and UI.
 - `main/fonts/LICENSE_NotoSansCJK.txt`: SIL OFL 1.1 license for the embedded font subset.

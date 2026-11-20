@@ -4,7 +4,9 @@
 #include "clock_service.h"
 #include "database.h"
 #include "keyboard.h"
+#include "power_service.h"
 #include "ui.h"
+#include "wifi_service.h"
 
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -29,6 +31,12 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(bsp_i2c_init());
     bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
+    static PowerService power;
+    power.ensure_charging_enabled();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (!power.init()) {
+        ESP_LOGW(TAG, "battery monitor unavailable; UI will still start");
+    }
     bsp_reset_tp();
     clock_service::init();
     bsp_codec_init();
@@ -72,11 +80,19 @@ extern "C" void app_main(void)
         ESP_LOGW(TAG, "keyboard unavailable; recognition cards still work");
     }
 
-    static AppUi ui(database, audio, keyboard);
+    static WifiService wifi;
+    if (!wifi.begin()) {
+        ESP_LOGW(TAG, "WiFi service unavailable; offline mode remains usable");
+    }
+
+    static AppUi ui(database, audio, keyboard, power, wifi);
     if (bsp_display_lock(1000)) {
         ui.init(display);
         if (database.ready()) {
             ui.show_home();
+            if (wifi.needs_setup()) {
+                ui.show_wifi_setup();
+            }
         } else {
             const std::string message =
                 sd_result != ESP_OK
@@ -87,7 +103,10 @@ extern "C" void app_main(void)
         bsp_display_unlock();
     }
 
-    ESP_LOGI(TAG, "Tab5 FSRS started, panel=%s", bsp_display_get_panel_ic());
+    ESP_LOGI(TAG, "Tab5 FSRS started, panel=%s, main stack free=%u bytes",
+             bsp_display_get_panel_ic(),
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr) *
+                                   sizeof(StackType_t)));
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

@@ -12,6 +12,7 @@ struct KeyEvent {
         Tab,
         Escape,
         Screenshot,
+        Other,
     };
     Type type = Type::None;
     char text[16] = {};

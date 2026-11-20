@@ -1,0 +1,19 @@
+menu "Tab5 application"
+
+    # ESP-Hosted 1.4.0 references optional USB transport manifest flags in
+    # registry metadata. Tab5 communicates with its ESP32-C6 over SDIO; these
+    # hidden compatibility flags only make the dependency metadata resolvable
+    # and do not enable a USB transport in the firmware.
+    config ESP_HOSTED_HOST_USB_CDC_ACM_MANIFEST
+        bool
+        default y
+
+    config ESP_HOSTED_HOST_USB_CHERRYUSB_MANIFEST
+        bool
+        default y
+
+    config ESP_HOSTED_HOST_USB_RNDIS_MANIFEST
+        bool
+        default y
+
+endmenu
